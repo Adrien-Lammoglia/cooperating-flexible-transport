@@ -1,0 +1,848 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Definition des variables
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+globals
+[
+list-marches  ; liste contenant l'identifiant de chaque marche
+list-taxis  ; liste contenant l'identifiant de chaque taxi
+taxis-list-agent
+jours  ; Nombre de jours ecoules
+nb-villageois-au-marche-total   ; Somme des clients deposes aux marches au cours de la simulation
+nb-villageois-cree-total  ; Nombre de villageois crees au cours de la simulation (= jours * nb-villageois)
+taux-de-desserte  ; (nb-villageois-au-marche-total / nb-villageois-cree-total) * 100
+taux-villageois-stations  ; nombre de stations avec des villageois /  nombre de stations total
+list-stations-villageois-restant
+]
+
+breed [taxis taxi]
+breed [stations station] ; Stations et marches sur lesquels convergent les villageois
+breed [villageois villageoi]
+
+
+taxis-own
+[
+noeud-actuel  ; Station sur laquelle se situe le taxi a l'instant t
+noeud-suivant  ; Prochaine station (t+1) desservie par le taxi
+etat   ; Variable permettant d'organiser et de declencher des procedures en fonction du contexte : 0 choix-noeud-suivant , 1 charge-passagers , 2 decharge-passagers , 3 avance
+nb-clients-embarques  ; Nombre de clients dans le taxi a l'instant t         
+clients-choisis  ; Villageois ayant la m�me destination que le taxi et a embarquer a l'instant t+1
+mes-clients  ; Liste des clients dans le taxi a l'instant t
+destination-marche-taxis  ; Marche choisi comme destination par le taxi
+nb-noeuds-passes  ; Compteur indiquant le nombre de stations desservies au cours de la simulation
+nb-noeuds-chargement  ; Compteur indiquant le nombre de stations sur lesquelles le taxi a embarque des clients
+taux-chargement  ; Indice d'efficacite du taxi : (nb-noeuds-chargement / nb-noeuds-passes)*100. ex: un indice proche de 1 signifie que le taxi a maximis� le nombre de clients pour une distance parcourue minimale
+distance-parcourue
+nb-clients-embarques-total
+gains ; indice de gains des taxis : ((nb-clients-embarques-total * 5) - distance-parcourue)
+ma-list
+]
+
+stations-own
+[
+marche? ; Attribut permettant d'indiquer si la station est un marche ou non (0=village et 1=marche)
+potentiel-brut  ; Potentiel d'attractivit� brut de chaque station
+potentiel-net  ; Potentiel d'attractivit� normalis� de chaque station : potentiel-brut / maxpotentiel (nombre de villageois de la station la plus attractive)
+nb-villageois-station  ; Nombre de villageois situes sur une station a l'instant t
+nb-villageois-pris  ; Total des clients pris pour chaque station au cours de la simulation
+nb-villageois-au-marche  ; Total des clients arrives a un marche
+
+]
+
+villageois-own 
+[ 
+destination-marche  ; Destination du villageois (correspondant a un des marches)
+destination-noeud  ; Station exercant une attrativit� sur le villageois
+taxi?  ; Variable d'etat permettant d'indiquer si le villageois et dans un taxi (1) ou non (0)
+]
+
+links-own 
+[
+traffic-brut  ; Nombre de passages d'un taxi sur un axe
+traffic-net  ; Nombre de passages normalise d'un taxi sur un axe
+]
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Initialisation
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+to initialisation-totale
+  ;; (for this model to work with NetLogo's new plotting features,
+  ;; __clear-all-and-reset-ticks should be replaced with clear-all at
+  ;; the beginning of your setup procedure and reset-ticks at the end
+  ;; of the procedure.)
+  __clear-all-and-reset-ticks
+  set list-stations-villageois-restant []
+  ask taxis [set ma-list []]  
+  creer-villageois
+  creer-stations-marches
+  connecter-stations  
+  creer-taxis    
+  choix-villageois-stations-marches
+  set jours 1
+end
+
+to initialisation-totale-manathan
+  ;; (for this model to work with NetLogo's new plotting features,
+  ;; __clear-all-and-reset-ticks should be replaced with clear-all at
+  ;; the beginning of your setup procedure and reset-ticks at the end
+  ;; of the procedure.)
+  __clear-all-and-reset-ticks
+  set list-stations-villageois-restant []
+  ask taxis [set ma-list []]  
+  creer-villageois
+  creer-stations-marches-manathan
+  connecter-stations  
+  creer-taxis    
+  choix-villageois-stations-marches
+  set jours 1
+end
+
+to creer-villageois ; Creer un nombre de villageois grace a un slider r�partis al�atoirement dans l'espace
+  create-villageois nb-villageois 
+  [
+    set color white
+    set shape "person"
+    set size 0.8
+    set xcor random-float max-pxcor
+    set ycor random-float max-pycor
+  ]
+  set nb-villageois-cree-total nb-villageois-cree-total + nb-villageois 
+end
+
+to connecter-stations ; Creer le reseau (liens entre les stations) en fonction d'une distance choisie par l'utilisateur (slider "contrainte-distance")
+  ask stations 
+  [
+    create-links-with stations in-radius contrainte-distance with [who != [who] of myself] 
+      [
+        set color 9 
+        set thickness 0.02 
+      ]
+  ]
+end
+
+to estimer-potentiel-stations ; Definir l'attractivite de chaque station a l'initialisation
+  ask stations 
+  [ 
+    set potentiel-brut count villageois with [distance myself <= rayon-attraction-stations] ] 
+    let maxpotentiel max [potentiel-brut] of stations 
+    ask stations 
+  [
+    set potentiel-net potentiel-brut / maxpotentiel 
+    set size 1 + potentiel-net ^ 3 
+  ]
+end
+
+to mise-a-jour-potentiel-stations  ; Mise a jour de l'attractivite des stations au cours de la simulation
+  let maxpotentiel max [potentiel-brut] of stations
+  ask stations 
+  [
+    set potentiel-net potentiel-brut / maxpotentiel 
+    set size 1 + potentiel-net ^ 4
+  ]
+end
+
+to mise-a-jour-traffic-liens  ; Mise a jour de l'attractivite des liens au cours de la simulation
+  let maxtraffic max [traffic-brut] of links
+  ask links 
+  [
+    set traffic-net traffic-brut / maxtraffic ^ 0.9 
+  ]
+end
+
+to creer-stations-marches ; Creer un nombre de stations et de marches grace a des sliders
+  create-stations nb-stations 
+  [
+    setxy random-xcor random-ycor 
+    set color green 
+    set shape "flag" 
+    set size 1 
+  ]
+  ask n-of nbmarches stations 
+  [
+    set marche? 1 
+    set color red 
+    set shape "house" 
+  ]
+  set list-marches [who] of stations with [ marche? = 1] 
+  estimer-potentiel-stations
+end
+
+to creer-stations-marches-manathan ; Creer un nombre de stations et de marches grace a des sliders
+  let xnoeudcor 0
+  let ynoeudcor 0
+  
+  while [ xnoeudcor <= 60 ]
+  [ 
+    while [ynoeudcor <= 60 ]
+    [ 
+      
+       
+      create-stations 1 
+      [
+        setxy xnoeudcor ynoeudcor
+        set color green 
+        set shape "flag" 
+        set size 1 
+      ]
+     set ynoeudcor ynoeudcor + 5 
+   ]
+  set xnoeudcor xnoeudcor + 5
+  set ynoeudcor 0
+  ]
+  
+
+  ask n-of nbmarches stations 
+  [
+    set marche? 1 
+    set color red 
+    set shape "house" 
+  ]
+  set list-marches [who] of stations with [ marche? = 1] 
+  estimer-potentiel-stations
+end
+
+
+        
+to creer-taxis  ; Creer des taxis (grace a un slider) se situant aleatoirement sur des stations
+  
+  create-taxis nb-taxis
+  [
+    set noeud-actuel one-of stations 
+    move-to noeud-actuel
+    set noeud-suivant one-of [link-neighbors] of noeud-actuel 
+    set nb-noeuds-passes (nb-noeuds-passes + 1) 
+    let ns noeud-suivant 
+    ask noeud-actuel 
+       [ ask link-with ns [ set traffic-brut (traffic-brut + 1)]]
+    set shape "car" 
+    set size 2 
+    set color yellow
+    set label who
+    set label-color 105
+    set etat 1 
+    set mes-clients [] 
+    set clients-choisis [] 
+  ]
+  set list-taxis [who] of taxis
+end
+
+  
+to compte-voyageurs ; Compter le nombre de voyageurs a chaque station
+  ask stations 
+  [
+    set nb-villageois-station count villageois-here
+  ]
+end
+ 
+ 
+ to initialisation-agents
+  ask taxis [die]
+  ask villageois [die]
+  clear-output
+  clear-all-plots
+  clear-drawing
+  set list-stations-villageois-restant []
+  ask stations with [marche? = 0] [set color green]
+  ask stations
+    [
+    set potentiel-brut 0
+    set potentiel-net 0
+    set nb-villageois-station 0
+    set nb-villageois-pris 0
+    set nb-villageois-au-marche 0
+    ]
+  ask links 
+    [
+    set thickness 0.05
+    set color 9.9
+    set traffic-brut 0
+    set traffic-net 0
+    ]
+  set jours 0 
+  set nb-villageois-au-marche-total 0 
+  set nb-villageois-cree-total 0
+  reset-ticks
+  creer-villageois    
+  creer-taxis
+  estimer-potentiel-stations
+  mise-a-jour-potentiel-stations
+  set list-stations-villageois-restant []
+  choix-villageois-stations-marches
+  set jours 1
+  ask taxis [set etat 3]
+end
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; potentiel d'attractivit�
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+ 
+to go-potentiel
+  if ticks = (jours * nb-ticks-jours - 1)
+  [
+    creer-villageois
+    mise-a-jour-potentiel-stations
+    choix-villageois-stations-marches
+    set jours (jours + 1)  
+  ]
+  deplacer-villageois
+  compte-voyageurs
+  go-taxis-potentiel
+  do-plotting
+  cartographie-traffic
+  mise-a-jour-traffic-liens
+  tick
+end
+
+
+to go-taxis-potentiel  ; Sequence des procedures des taxis
+  ask taxis
+  [
+    ifelse etat = 0 
+      [choix-noeud-potentiel]
+      [ifelse etat = 1
+        [charger-clients]
+        [ifelse etat = 2
+          [decharger-clients]
+          [deplacer]
+        ]
+      ]
+  ]
+end
+
+
+to choix-noeud-potentiel  ; Choisir le prochain noeud sur lequel va passer le taxi
+  ifelse destination-marche-taxis = 0 
+    [
+      let na noeud-actuel
+      set noeud-actuel noeud-suivant
+      let ne min-one-of [link-neighbors with [marche? = 0]] of noeud-actuel [potentiel-brut] 
+      set noeud-suivant max-one-of [link-neighbors with [marche? = 0]] of noeud-actuel [ potentiel-brut ] 
+      if noeud-suivant = na or noeud-suivant = ne
+        [set noeud-suivant one-of [link-neighbors] of noeud-actuel]
+      let ns noeud-suivant 
+      ask noeud-actuel 
+        [ ask link-with ns [ set traffic-brut (traffic-brut + 1) ]]
+    ]
+    [ 
+      let na noeud-actuel
+      let dest destination-marche-taxis 
+      set noeud-actuel noeud-suivant 
+      set noeud-suivant min-one-of [link-neighbors] of noeud-actuel [distance dest]
+      let ne max-one-of [link-neighbors] of noeud-actuel [distance dest]
+      while [noeud-suivant = na]
+          [
+            set noeud-suivant one-of [link-neighbors] of noeud-actuel
+          ]
+      let ns noeud-suivant 
+      ask noeud-actuel 
+        [ ask link-with ns [ set traffic-brut (traffic-brut + 1) ]]
+    ] 
+  set nb-noeuds-passes (nb-noeuds-passes + 1)
+  set etat 3
+end
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; distance
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+to go-distance
+  if ticks = (jours * nb-ticks-jours - 1)
+  [
+    creer-villageois
+    mise-a-jour-potentiel-stations
+    choix-villageois-stations-marches
+    set jours (jours + 1)  
+  ]
+  deplacer-villageois
+  compte-voyageurs
+  go-taxis-distance
+  do-plotting
+  cartographie-traffic
+  mise-a-jour-traffic-liens
+  tick
+end
+
+to go-taxis-distance  ; Sequence des procedures des taxis
+  ask taxis
+  [
+    ifelse etat = 0 
+      [choix-noeud-distance]
+      [ifelse etat = 1
+        [charger-clients]
+        [ifelse etat = 2
+          [decharger-clients]
+          [deplacer]
+        ]
+      ]
+  ]
+end
+
+to choix-noeud-distance  ; Choisir le prochain noeud sur lequel va passer le taxi
+  ifelse destination-marche-taxis = 0 
+    [
+      let na noeud-actuel
+      set noeud-actuel noeud-suivant
+      let ne max-one-of [link-neighbors with [marche? = 0]] of noeud-actuel [distance myself] 
+      set noeud-suivant min-one-of [link-neighbors with [marche? = 0]] of noeud-actuel [ distance myself ] 
+      if noeud-suivant = na or noeud-suivant = ne
+        [set noeud-suivant one-of [link-neighbors] of noeud-actuel]
+      let ns noeud-suivant 
+      ask noeud-actuel 
+        [ ask link-with ns [ set traffic-brut (traffic-brut + 1) ]]
+    ]
+    [ 
+      let na noeud-actuel
+      let dest destination-marche-taxis 
+      set noeud-actuel noeud-suivant 
+      set noeud-suivant min-one-of [link-neighbors] of noeud-actuel [distance dest]
+      while [noeud-suivant = na]
+          [
+            set noeud-suivant one-of [link-neighbors] of noeud-actuel
+          ]
+      let ns noeud-suivant 
+      ask noeud-actuel 
+        [ ask link-with ns [ set traffic-brut (traffic-brut + 1) ]]
+    ] 
+  set nb-noeuds-passes (nb-noeuds-passes + 1)
+  set etat 3
+end
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; mod�le al�atoire
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+to go-aleatoire
+  if ticks = (jours * nb-ticks-jours - 1)
+  [
+    creer-villageois
+    mise-a-jour-potentiel-stations
+    choix-villageois-stations-marches
+    set jours (jours + 1)  
+  ]
+  deplacer-villageois
+  compte-voyageurs
+  go-taxis-aleatoire
+  do-plotting
+  cartographie-traffic
+  mise-a-jour-traffic-liens
+  tick
+end
+
+to go-taxis-aleatoire  ; Sequence des procedures des taxis
+  ask taxis
+  [
+    ifelse etat = 0 
+      [choix-noeud-aleatoire]
+      [ifelse etat = 1
+        [charger-clients]
+        [ifelse etat = 2
+          [decharger-clients]
+          [deplacer]
+        ]
+      ]
+  ]
+end
+
+to choix-noeud-aleatoire  ; Choisir le prochain noeud sur lequel va passer le taxi
+  ifelse destination-marche-taxis = 0 
+    [
+      let na noeud-actuel
+      set noeud-actuel noeud-suivant
+      set noeud-suivant one-of [link-neighbors with [marche? = 0]] of noeud-actuel
+      let ns noeud-suivant 
+      ask noeud-actuel 
+        [ ask link-with ns [ set traffic-brut (traffic-brut + 1) ]]
+    ]
+    [ 
+      let na noeud-actuel
+      let dest destination-marche-taxis 
+      set noeud-actuel noeud-suivant 
+      set noeud-suivant min-one-of [link-neighbors] of noeud-actuel [distance dest]
+      while [noeud-suivant = na]
+          [
+            set noeud-suivant one-of [link-neighbors] of noeud-actuel
+          ]
+      let ns noeud-suivant 
+      ask noeud-actuel 
+        [ ask link-with ns [ set traffic-brut (traffic-brut + 1) ]]
+    ]
+  set nb-noeuds-passes (nb-noeuds-passes + 1)
+  set etat 3
+end
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; coop�ration
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+to go-cooperation
+  if ticks = ((jours * nb-ticks-jours) - 1)
+  [
+    creer-villageois
+    mise-a-jour-potentiel-stations
+    choix-villageois-stations-marches
+    set jours (jours + 1)  
+  ]
+  deplacer-villageois
+  compte-voyageurs
+  go-taxis-cooperation
+  do-plotting
+  cartographie-traffic
+  mise-a-jour-traffic-liens
+  tick
+end
+
+to go-taxis-cooperation  ; Sequence des procedures des taxis
+  ask taxis
+  [
+    ifelse etat = 0 
+      [choix-noeud-cooperation]
+      [ifelse etat = 1
+        [charger-clients-cooperation]
+        [ifelse etat = 2
+          [decharger-clients]
+          [deplacer]
+        ]
+      ]
+  ]
+end
+
+to choix-noeud-cooperation  ; Choisir le prochain noeud sur lequel va passer le taxi
+  ifelse destination-marche-taxis = 0 
+   [
+        ifelse empty? list-stations-villageois-restant
+        [
+          let na noeud-actuel
+          set noeud-actuel noeud-suivant
+          set noeud-suivant one-of [link-neighbors] of noeud-actuel
+          while [noeud-suivant = na]
+          [
+            set noeud-suivant one-of [link-neighbors] of noeud-actuel
+          ]
+          let ns noeud-suivant 
+          ask noeud-actuel 
+          [ ask link-with ns [ set traffic-brut (traffic-brut + 1) ]]
+        ]
+        [
+          let na noeud-actuel
+          set list-stations-villageois-restant sort-by [[distance myself] of ?1 < [distance myself] of ?2] list-stations-villageois-restant
+          let station-a-desservir first list-stations-villageois-restant
+          set noeud-actuel noeud-suivant
+          set noeud-suivant min-one-of [link-neighbors] of noeud-actuel [distance station-a-desservir]
+          let ne max-one-of [link-neighbors] of noeud-actuel [distance station-a-desservir]
+          while [noeud-suivant = na]
+          [
+            set noeud-suivant one-of [link-neighbors] of noeud-actuel
+          ]
+          if noeud-suivant = station-a-desservir and destination-marche-taxis = 0 [ set list-stations-villageois-restant remove-item 0 list-stations-villageois-restant]
+          let ns noeud-suivant 
+          ask noeud-actuel 
+          [ ask link-with ns [ set traffic-brut (traffic-brut + 1) ]]
+        ]
+   ]
+   [
+    let na noeud-actuel
+    let dest destination-marche-taxis 
+    set noeud-actuel noeud-suivant 
+    set noeud-suivant min-one-of [link-neighbors] of noeud-actuel [distance dest]
+    let ns noeud-suivant
+    while [noeud-suivant = na]
+        [set noeud-suivant one-of [link-neighbors] of noeud-actuel]
+    ask noeud-actuel 
+      [ ask link-with ns [ set traffic-brut (traffic-brut + 1) ]]
+  ] 
+  set nb-noeuds-passes (nb-noeuds-passes + 1)
+  set etat 3
+end
+
+to cooperer
+  ifelse [nb-villageois-station] of noeud-suivant > 0
+        [
+           if not member? noeud-suivant list-stations-villageois-restant
+           [
+           set list-stations-villageois-restant fput noeud-suivant list-stations-villageois-restant
+           ask noeud-suivant [set color 25]
+           ]
+        ]
+        [
+          set list-stations-villageois-restant remove noeud-suivant list-stations-villageois-restant
+          if [marche? = 0] of noeud-suivant [ ask noeud-suivant [set color green]]
+          set etat 0
+        ]
+end
+
+
+to charger-clients-cooperation  ; Choisir les clients et les embarquer
+  ifelse any? villageois-here with [taxi? = 0]
+    [
+      let nb-clients-ici [nb-villageois-station] of noeud-suivant 
+      if length mes-clients = 0 
+        [ set destination-marche-taxis [destination-marche] of one-of villageois-here with [taxi? = 0] ] 
+      let dest-taxi destination-marche-taxis 
+      let nb-clients-possibles count villageois-here with [taxi? = 0 and destination-marche = dest-taxi] 
+      if nb-clients-possibles > 0 
+      [
+        let nb-clients-a-prendre min (list (capacite-max-taxis - nb-clients-embarques) nb-clients-possibles) 
+        ask noeud-suivant [ set nb-villageois-pris (nb-villageois-pris + nb-clients-a-prendre)]
+        set clients-choisis n-of nb-clients-a-prendre villageois-here with [taxi? = 0 and destination-marche = dest-taxi ] 
+        ask clients-choisis 
+        [ 
+          set taxi? [who] of myself  
+          set color red 
+        ]
+        set mes-clients fput clients-choisis mes-clients 
+        set nb-clients-embarques count villageois with [taxi? = [who] of myself ]
+      ]
+      ask noeud-suivant [set nb-villageois-station (nb-clients-ici - [nb-clients-embarques] of myself)]
+      cooperer
+      set nb-noeuds-chargement (nb-noeuds-chargement + 1) 
+      set nb-clients-embarques-total nb-clients-embarques-total + nb-clients-embarques
+      set gains ((nb-clients-embarques-total * 5) - distance-parcourue)
+      set taux-chargement (nb-noeuds-chargement / nb-noeuds-passes ) * 100
+      set etat 0
+    ]
+    [
+    set list-stations-villageois-restant remove noeud-suivant list-stations-villageois-restant
+    if [marche? = 0] of noeud-suivant [ ask noeud-suivant [set color green]]
+    set etat 0
+    ]
+end
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Code commun
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+to choix-villageois-stations-marches  ; Definir la destination de la station et du marche de chaque villageois en fonction du potentiel de chacun
+  ask villageois  
+  [    
+     if destination-marche = 0
+     [
+     set destination-marche max-one-of stations with [ marche? = 1 ] [ potentiel-brut / (distance myself) ]
+     set destination-noeud max-one-of stations with [distance myself < distance-marcher-max and marche? = 0] [ potentiel-brut / (distance myself) ]
+     if distance destination-noeud > distance destination-marche
+        [ set destination-noeud destination-marche ]
+     ]
+  ]  
+end
+
+to deplacer-villageois ; Deplacer les villageois vers une station
+  ask villageois with [taxi? = 0] 
+  [
+    face destination-noeud 
+    ifelse distance destination-noeud >= vitesse-deplacement + 1
+      [fd vitesse-deplacement ] 
+      [if distance destination-noeud > 0 
+        [ 
+          move-to destination-noeud
+          if destination-noeud = destination-marche
+            [die]
+        ] 
+      ] 
+  ]
+end
+
+
+to deplacer  ; Deplacement du taxi optimis� en selon els diff�rents principes
+  set heading towards noeud-suivant
+  if length mes-clients > 0 
+    [
+      ask villageois with [taxi? = [who] of myself] 
+        [
+          set heading [heading] of myself
+        ]
+    ] 
+  ifelse distance noeud-suivant > vitesse-deplacement * facteur-vitesse + 0.1 
+  [
+    fd vitesse-deplacement * facteur-vitesse
+    if length mes-clients > 0 
+      [
+        ask villageois with [taxi? = [who] of myself] 
+          [
+            fd vitesse-deplacement * facteur-vitesse
+          ]
+      ]
+  ]
+  [
+    move-to noeud-suivant
+    ifelse noeud-suivant = destination-marche-taxis
+      [ set etat 2 ]
+      [
+        if length mes-clients > 0 
+          [
+            ask villageois with [taxi? = [who] of myself]  
+              [
+                move-to [noeud-suivant] of myself
+              ]
+           ]
+        set etat 1   
+      ]  
+  ] 
+end
+
+
+to charger-clients  ; Choisir les clients et les embarquer
+  if any? villageois-here with [taxi? = 0]
+    [
+      let nb-clients-ici [nb-villageois-station] of noeud-actuel 
+      if length mes-clients = 0 
+        [ set destination-marche-taxis [destination-marche] of one-of villageois-here with [taxi? = 0] ] 
+      let dest-taxi destination-marche-taxis 
+      let nb-clients-possibles count villageois-here with [taxi? = 0 and destination-marche = dest-taxi] 
+      if nb-clients-possibles > 0 
+      [
+        let nb-clients-a-prendre min (list (capacite-max-taxis - nb-clients-embarques) nb-clients-possibles) 
+        ask noeud-actuel [ set nb-villageois-pris (nb-villageois-pris + nb-clients-a-prendre)]
+        ask noeud-actuel [ set potentiel-brut (potentiel-brut + nb-clients-a-prendre) ]
+        set clients-choisis n-of nb-clients-a-prendre villageois-here with [taxi? = 0 and destination-marche = dest-taxi ] 
+        ask clients-choisis 
+        [ 
+          set taxi? [who] of myself  
+          set color red 
+        ]
+        set mes-clients fput clients-choisis mes-clients 
+        set nb-clients-embarques count villageois with [taxi? = [who] of myself ]
+        set nb-clients-embarques-total nb-clients-embarques-total + nb-clients-embarques
+        set gains ((nb-clients-embarques-total * 5) - distance-parcourue)
+        set nb-noeuds-chargement (nb-noeuds-chargement + 1) 
+        set taux-chargement (nb-noeuds-chargement / nb-noeuds-passes ) * 100
+      ]    
+    ]
+    set etat 0
+end
+
+to decharger-clients  ; Decharger les clients et mettre a jour les compteurs
+  let n nb-clients-embarques 
+  ask destination-marche-taxis 
+    [
+    set nb-villageois-au-marche nb-villageois-au-marche + n 
+    set nb-villageois-au-marche-total nb-villageois-au-marche-total + n 
+    ]
+  set nb-clients-embarques 0 
+  set mes-clients [] 
+  set clients-choisis [] 
+  ask villageois with [taxi? = [who] of myself] 
+    [die]
+  set destination-marche-taxis 0 
+  set etat 1 
+end
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Graphiques
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+to cartographie-traffic  ; Trace des trajets en fonction du traffic
+  ask links with [traffic-brut > 1] 
+  [
+    set thickness 0.01 + traffic-net 
+    set color 135
+  ]
+end
+
+
+to do-plotting  ; Tracer le graphique du nombre de clients deposes sur chaque marche
+  set-current-plot "Nb villageois arrives"
+  ask station first list-marches 
+    [
+    set-current-plot-pen "marche1" plot nb-villageois-au-marche
+    set label "Marche 1"
+    ]
+  if nbmarches > 1 
+    [
+    ask station item 1 list-marches 
+      [
+      set-current-plot-pen "marche2" plot nb-villageois-au-marche
+      set label "Marche 2"
+      ]
+    ]
+  if nbmarches > 2 
+    [
+    ask station item 2 list-marches
+      [
+      set-current-plot-pen "Marche3" plot nb-villageois-au-marche
+      set label "Marche 3"
+      ]
+    ]
+  set-current-plot "taux-chargement-moyen"
+  plot mean [taux-chargement] of taxis
+  
+  set-current-plot "taux-villageois-stations"
+  set taux-villageois-stations ((count stations with [nb-villageois-station > 0]) / nb-stations) * 100
+  plot taux-villageois-stations
+  
+  set-current-plot "taux-de-desserte"
+  set taux-de-desserte (nb-villageois-au-marche-total / nb-villageois-cree-total) * 100
+  plot taux-de-desserte
+  
+  set-current-plot "taux-remplissage-mean"
+  plot mean [nb-clients-embarques] of taxis
+  
+  set-current-plot "gains moyens"
+  plot mean [gains] of taxis
+  
+  
+end
+to-report nb-clients-embarquesByTaxi [id ]
+  report [nb-clients-embarques] of (item id taxis-list-agent)
+  
+end
+to importWord1
+  ifelse worldchooser = 1
+  [
+  import-world "world1_2.csv"
+  ]
+  [
+   ifelse worldchooser = 2
+   [
+  import-world "world2_2.csv"
+     
+   ]
+   [
+   ifelse worldchooser = 3
+    [
+  import-world "world3_2.csv"
+      
+    ]
+    [
+  import-world "world4_2.csv"
+      
+    ] 
+   ]
+  ]
+  ask villageois
+  [
+    die
+  ]
+  ask taxis
+  [
+    die
+  ]
+  
+  reset-ticks
+    set nb-villageois nb-vill
+  set nb-ticks-jours nbtik
+creer-villageois
+creer-taxis
+  choix-villageois-stations-marches
+  set jours 1
+  set nb-stations (count stations)
+  set taxis-list-agent []
+  
+  ask taxis
+  [
+    
+       set taxis-list-agent lput self taxis-list-agent 
+  ]
+end
